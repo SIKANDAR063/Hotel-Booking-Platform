@@ -1,0 +1,296 @@
+import express ,{Request, Response}from "express";
+import multer from "multer";
+import cloudinary from "cloudinary";
+import Hotel, { HotelType } from "../models/hotel";
+import { verify } from "crypto";
+import verifyToken from "../middleware/auth";
+import { body, validationResult } from "express-validator";
+
+
+const router = express.Router();
+const storgae = multer.memoryStorage();
+const upload = multer({
+    storage: storgae,
+    limits:{
+        fileSize: 5*1024*1024
+
+    }
+})
+
+
+router.post("/", verifyToken, upload.array("imageFiles", 6), async (req: Request, res: Response): Promise<void> => {
+try{
+    console.log("=== HOTEL CREATION REQUEST ===");
+    console.log("Raw request body:", req.body);
+    console.log("Request headers:", req.headers);
+    console.log("Files received:", req.files);
+    console.log("User ID from token:", req.userId);
+    console.log("User ID type:", typeof req.userId);
+    
+    const imageFiles = req.files as Express.Multer.File[];
+    const newHotel: any = req.body;
+    
+    // Log all form fields
+    console.log("All form fields:");
+    Object.keys(req.body).forEach(key => {
+        console.log(`${key}:`, req.body[key]);
+    });
+    
+    // Validate required fields manually
+    const requiredFields = ['name', 'city', 'country', 'description', 'type', 'pricePerNight', 'starRating', 'adultCount', 'childCount'];
+    const missingFields = requiredFields.filter(field => !newHotel[field]);
+    
+    console.log("Required fields check:");
+    requiredFields.forEach(field => {
+        console.log(`${field}:`, newHotel[field] ? "✓ Present" : "✗ Missing");
+    });
+    
+    if (missingFields.length > 0) {
+        console.log("Missing fields:", missingFields);
+        res.status(400).json({ 
+            message: "Missing required fields", 
+            missingFields 
+        });
+        return;
+    }
+    
+         // Parse facilities from FormData
+     let facilities: string[] = [];
+     
+     // Check if facilities is sent as a JSON string
+     if (req.body.facilities) {
+         try {
+             // If it's already an array, use it directly
+             if (Array.isArray(req.body.facilities)) {
+                 facilities = req.body.facilities;
+             } else {
+                 // If it's a JSON string, parse it
+                 facilities = JSON.parse(req.body.facilities);
+             }
+         } catch (error) {
+             console.log("Error parsing facilities:", error);
+         }
+     }
+     
+     // Fallback: check for individual facilities fields
+     if (facilities.length === 0) {
+         Object.keys(req.body).forEach(key => {
+             if (key.startsWith('facilities[')) {
+                 facilities.push(req.body[key]);
+             }
+         });
+     }
+     
+     console.log("Facilities found:", facilities);
+     
+     if (facilities.length === 0) {
+         console.log("No facilities found in request");
+         res.status(400).json({ 
+             message: "At least one facility is required" 
+         });
+         return;
+     }
+    
+    newHotel.facilities = facilities;
+    
+    // Ensure numeric fields are numbers
+    newHotel.pricePerNight = Number(newHotel.pricePerNight);
+    newHotel.starRating = Number(newHotel.starRating);
+    newHotel.adultCount = Number(newHotel.adultCount);
+    newHotel.childCount = Number(newHotel.childCount);
+    
+    console.log("Processed hotel data:", newHotel);
+    console.log("Image files count:", imageFiles ? imageFiles.length : 0);
+
+    let imageUrls: string[] = [];
+    
+    if (imageFiles && imageFiles.length > 0) {
+        try {
+            const uploadPromises = imageFiles.map(async(image)=>{
+                const b64 = Buffer.from(image.buffer).toString("base64");
+                let dataURI= "data:" + image.mimetype + ";base64," + b64;
+                const res = await cloudinary.v2.uploader.upload(dataURI);
+                return res.url;
+            });
+            imageUrls = await Promise.all(uploadPromises);
+        } catch (cloudinaryError) {
+            console.log("Cloudinary upload error:", cloudinaryError);
+            // Continue without images if Cloudinary fails
+            imageUrls = [];
+        }
+    }
+                 newHotel.imageUrls = imageUrls;
+         newHotel.lastUpdated = new Date();
+         
+         // Ensure userId is set
+         if (!req.userId) {
+             console.log("ERROR: userId is undefined!");
+             res.status(401).json({ 
+                 message: "User not authenticated" 
+             });
+             return;
+         }
+         
+         newHotel.userId = req.userId;
+         
+         console.log("Final hotel data to save:", newHotel);
+        
+        const hotel = new Hotel(newHotel);
+        await hotel.save();
+        console.log("Hotel saved successfully:", hotel._id);
+        res.status(201).send(hotel);
+
+
+
+}
+catch(e){
+    console.log("Error creating Hotels:",e);
+    res.status(500).json({
+        message:
+            "Something Went Wrong" });
+}
+});
+
+router.get("/", verifyToken, async (req: Request, res: Response) => {
+    try {
+      const hotels = await Hotel.find({ userId: req.userId });
+      res.json(hotels);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching hotels" });
+    }
+  });
+
+  router.get("/:id", verifyToken, async (req: Request, res: Response) => {
+    const id = req.params.id.toString();
+    try {
+      const hotel = await Hotel.findOne({
+        _id: id,
+        userId: req.userId,
+      });
+      res.json(hotel);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching hotels" });
+    }
+  });
+
+  router.put("/:id", verifyToken, upload.array("imageFiles", 6), async (req: Request, res: Response): Promise<void> => {
+    try {
+      const hotelId = req.params.id;
+      console.log("=== HOTEL UPDATE REQUEST ===");
+      console.log("Hotel ID:", hotelId);
+      console.log("Raw request body:", req.body);
+      console.log("Files received:", req.files);
+      
+      const imageFiles = req.files as Express.Multer.File[];
+      const updateData: any = req.body;
+      
+      // Validate required fields
+      const requiredFields = ['name', 'city', 'country', 'description', 'type', 'pricePerNight', 'starRating', 'adultCount', 'childCount'];
+      const missingFields = requiredFields.filter(field => !updateData[field]);
+      
+      if (missingFields.length > 0) {
+        res.status(400).json({ 
+          message: "Missing required fields", 
+          missingFields 
+        });
+        return;
+      }
+      
+      // Parse facilities from FormData
+      let facilities: string[] = [];
+      
+      if (req.body.facilities) {
+        try {
+          if (Array.isArray(req.body.facilities)) {
+            facilities = req.body.facilities;
+          } else {
+            facilities = JSON.parse(req.body.facilities);
+          }
+        } catch (error) {
+          console.log("Error parsing facilities:", error);
+        }
+      }
+      
+      if (facilities.length === 0) {
+        Object.keys(req.body).forEach(key => {
+          if (key.startsWith('facilities[')) {
+            facilities.push(req.body[key]);
+          }
+        });
+      }
+      
+      if (facilities.length === 0) {
+        res.status(400).json({ 
+          message: "At least one facility is required" 
+        });
+        return;
+      }
+      
+      updateData.facilities = facilities;
+      
+      // Ensure numeric fields are numbers
+      updateData.pricePerNight = Number(updateData.pricePerNight);
+      updateData.starRating = Number(updateData.starRating);
+      updateData.adultCount = Number(updateData.adultCount);
+      updateData.childCount = Number(updateData.childCount);
+      
+      let imageUrls: string[] = [];
+      
+      // First, get existing image URLs from the request
+      if (req.body.imageUrls) {
+        try {
+          if (Array.isArray(req.body.imageUrls)) {
+            imageUrls = req.body.imageUrls;
+          } else {
+            // Handle case where imageUrls might be sent as individual fields
+            Object.keys(req.body).forEach(key => {
+              if (key.startsWith('imageUrls[')) {
+                imageUrls.push(req.body[key]);
+              }
+            });
+          }
+        } catch (error) {
+          console.log("Error parsing existing image URLs:", error);
+        }
+      }
+      
+      // Then, upload new images and add them to the existing ones
+      if (imageFiles && imageFiles.length > 0) {
+        try {
+          const uploadPromises = imageFiles.map(async(image) => {
+            const b64 = Buffer.from(image.buffer).toString("base64");
+            let dataURI = "data:" + image.mimetype + ";base64," + b64;
+            const res = await cloudinary.v2.uploader.upload(dataURI);
+            return res.url;
+          });
+          const newImageUrls = await Promise.all(uploadPromises);
+          imageUrls = [...imageUrls, ...newImageUrls]; // Merge existing and new images
+        } catch (cloudinaryError) {
+          console.log("Cloudinary upload error:", cloudinaryError);
+          // Keep existing images even if new upload fails
+        }
+      }
+      
+      updateData.imageUrls = imageUrls;
+      updateData.lastUpdated = new Date();
+      
+      const hotel = await Hotel.findOneAndUpdate(
+        { _id: hotelId, userId: req.userId },
+        updateData,
+        { new: true }
+      );
+      
+      if (!hotel) {
+        res.status(404).json({ message: "Hotel not found" });
+        return;
+      }
+      
+      res.json(hotel);
+      
+    } catch (error) {
+      console.log("Error updating hotel:", error);
+      res.status(500).json({ message: "Something went wrong" });
+    }
+  });
+
+export default router;
